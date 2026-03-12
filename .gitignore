@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cartography outputs (included for specific targets, excluded globally)
+.cartography/
+
+# Targets (cloned repos - user should clone themselves)
+targets/
+
+# Temp files
+*.log
+.coverage
+htmlcov/
