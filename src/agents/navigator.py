@@ -13,6 +13,8 @@ from typing import Annotated, Literal
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from rich.console import Console
 
 from src.graph.knowledge_graph import KnowledgeGraph
@@ -22,6 +24,45 @@ console = Console()
 # Global state for tools (since LangChain tools are decorated functions)
 _module_graph: KnowledgeGraph | None = None
 _lineage_graph: KnowledgeGraph | None = None
+_semantic_index: dict | None = None
+
+
+def _ensure_semantic_index() -> dict | None:
+    """Build a lightweight TF-IDF semantic index for module retrieval."""
+    global _semantic_index
+    if _semantic_index is not None:
+        return _semantic_index
+    if not _module_graph:
+        return None
+
+    modules = _module_graph.get_nodes_by_type("module")
+    if not modules:
+        return None
+
+    docs = []
+    ids = []
+    for node in modules:
+        mod_id = node.get("id", "")
+        purpose = node.get("purpose_statement", "")
+        funcs = " ".join(node.get("public_functions", []))
+        classes = " ".join(node.get("public_classes", []))
+        text = " ".join([mod_id, purpose, funcs, classes]).strip()
+        if text:
+            docs.append(text)
+            ids.append(mod_id)
+
+    if not docs:
+        return None
+
+    vectorizer = TfidfVectorizer(stop_words="english", max_features=4000)
+    matrix = vectorizer.fit_transform(docs)
+    _semantic_index = {
+        "ids": ids,
+        "docs": docs,
+        "vectorizer": vectorizer,
+        "matrix": matrix,
+    }
+    return _semantic_index
 
 
 @tool
@@ -29,30 +70,34 @@ def find_implementation(concept_or_keyword: str) -> str:
     """Finds modules or public functions related to a specific concept or keyword."""
     if not _module_graph:
         return "Module graph not loaded."
-        
+
+    # Vector-grounded retrieval over module path + purpose + public symbols.
+    index = _ensure_semantic_index()
+    if not index:
+        return "No semantic index available. [method:static-vector]"
+
+    query_vec = index["vectorizer"].transform([concept_or_keyword])
+    sims = cosine_similarity(query_vec, index["matrix"]).flatten()
+    ranked = sorted(enumerate(sims), key=lambda x: x[1], reverse=True)
+
     results = []
-    # Search nodes
-    for node in _module_graph.get_nodes_by_type("module"):
-        # Check path and purpose
-        path = node.get("id", "")
-        purpose = node.get("purpose_statement", "")
-        if concept_or_keyword.lower() in path.lower() or (purpose and concept_or_keyword.lower() in purpose.lower()):
-            results.append(f"- Module: {path} (Purpose: {purpose})")
-            
-        # Check public functions/classes
-        funcs = node.get("public_functions", [])
-        classes = node.get("public_classes", [])
-        for f in funcs:
-            if concept_or_keyword.lower() in f.lower():
-                results.append(f"  - Function: {f} in {path}")
-        for c in classes:
-            if concept_or_keyword.lower() in c.lower():
-                results.append(f"  - Class: {c} in {path}")
-                
+    for idx, score in ranked[:10]:
+        if score <= 0:
+            continue
+        mod_id = index["ids"][idx]
+        node = _module_graph.get_node(mod_id) or {}
+        purpose = node.get("purpose_statement", "No purpose statement.")
+        results.append(
+            f"- Module: {mod_id} (score={score:.3f})\n"
+            f"  Evidence: {mod_id}\n"
+            f"  Method: static-vector (TF-IDF cosine similarity)\n"
+            f"  Purpose: {purpose}"
+        )
+
     if not results:
-        return f"No implementations found matching '{concept_or_keyword}'."
-        
-    return "Found the following implementations:\n" + "\n".join(results[:15])
+        return f"No implementations found matching '{concept_or_keyword}'. [method:static-vector]"
+
+    return "Found the following implementations:\n" + "\n".join(results)
 
 
 @tool
@@ -69,7 +114,7 @@ def trace_lineage(dataset_id: str, direction: str = "upstream") -> str:
                 dataset_id = n["id"]
                 break
         else:
-            return f"Dataset '{dataset_id}' not found."
+            return f"Dataset '{dataset_id}' not found. [method:static-graph]"
 
     edges = _lineage_graph.get_all_edges()
     related = []
@@ -109,7 +154,7 @@ def trace_lineage(dataset_id: str, direction: str = "upstream") -> str:
                     continue
                 seen.add(key)
                 related.append(
-                    f"- Upstream source: {src} via {edge_type} [{loc}]"
+                    f"- Upstream source: {src} via {edge_type} [{loc}] [method:static-graph]"
                 )
     else:  # downstream
         for e in edges:
@@ -122,11 +167,11 @@ def trace_lineage(dataset_id: str, direction: str = "upstream") -> str:
                     continue
                 seen.add(key)
                 related.append(
-                    f"- Downstream target: {tgt} via {edge_type} [{loc}]"
+                    f"- Downstream target: {tgt} via {edge_type} [{loc}] [method:static-graph]"
                 )
 
     if not related:
-        return f"No {direction} dependencies found for '{dataset_id}'."
+        return f"No {direction} dependencies found for '{dataset_id}'. [method:static-graph]"
 
     return "\n".join(related)
 
@@ -139,7 +184,7 @@ def blast_radius(module_path: str) -> str:
         
     node = _module_graph.get_node(module_path)
     if not node:
-        return f"Module '{module_path}' not found. Are you sure you have the correct file path?"
+        return f"Module '{module_path}' not found. Are you sure you have the correct file path? [method:static-graph]"
         
     # Find all downstream dependents (edges where target is this module... wait, IMPORTS edge means source imports target)
     # If A imports B (A -> B), then changing B impacts A.
@@ -150,9 +195,13 @@ def blast_radius(module_path: str) -> str:
             impacted.append(e["source"])
             
     if not impacted:
-        return f"Changing '{module_path}' has 0 known downstream dependents (safe to modify)."
-        
-    return f"Changing '{module_path}' impacts {len(impacted)} modules directly:\n" + "\n".join(f"- {m}" for m in impacted)
+        return f"Changing '{module_path}' has 0 known downstream dependents (safe to modify). Evidence: {module_path} [method:static-graph]"
+
+    return (
+        f"Changing '{module_path}' impacts {len(impacted)} modules directly. "
+        f"Evidence: {module_path} [method:static-graph]\n"
+        + "\n".join(f"- {m}" for m in impacted)
+    )
 
 
 @tool
@@ -163,7 +212,7 @@ def explain_module(module_path: str) -> str:
         
     node = _module_graph.get_node(module_path)
     if not node:
-        return f"Module '{module_path}' not found."
+        return f"Module '{module_path}' not found. [method:static-graph]"
         
     details = [
         f"**Module**: {node.get('id')}",
@@ -174,6 +223,8 @@ def explain_module(module_path: str) -> str:
         f"**Public API**: {len(node.get('public_functions', []))} functions, {len(node.get('public_classes', []))} classes",
         f"**Doc Drift Alarm**: {'Yes' if node.get('documentation_drift') else 'No'}"
     ]
+    details.append("**Method**: static-graph (+ LLM-generated purpose fields if present)")
+    details.append(f"**Evidence**: {module_path}")
     return "\n".join(details)
 
 
@@ -185,12 +236,13 @@ class NavigatorAgent:
         self.output_dir = self.repo_path / ".cartography"
         
         # Load the graphs
-        global _module_graph, _lineage_graph
+        global _module_graph, _lineage_graph, _semantic_index
         try:
             mod_graph = KnowledgeGraph.load(self.output_dir / "module_graph.json")
             lin_graph = KnowledgeGraph.load(self.output_dir / "lineage_graph.json")
             _module_graph = mod_graph
             _lineage_graph = lin_graph
+            _semantic_index = None
             self.loaded = True
         except Exception:
             self.loaded = False

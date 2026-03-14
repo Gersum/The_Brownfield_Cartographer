@@ -11,9 +11,11 @@ Produces and maintains the system's outputs as living artifacts:
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import networkx as nx
 from rich.console import Console
 
 from src.graph.knowledge_graph import KnowledgeGraph
@@ -33,6 +35,7 @@ class ArchivistAgent:
         self.module_graph = module_graph
         self.lineage_graph = lineage_graph
         self.output_dir = self.repo_path / ".cartography"
+        self.trace_log: list[dict] = []
 
     def run(self, extra_context: Optional[dict] = None) -> dict[str, Path]:
         """Generate all artifacts."""
@@ -44,10 +47,12 @@ class ArchivistAgent:
         # 1. System Map (Mermaid)
         system_map_path = self.generate_system_map()
         artifacts["system_map"] = system_map_path
+        self._log("generate_artifact", str(system_map_path), "success", "static", ["module_graph.json"], 0.95)
 
         # 2. Lineage Map (Mermaid)
         lineage_map_path = self.generate_lineage_map()
         artifacts["lineage_map"] = lineage_map_path
+        self._log("generate_artifact", str(lineage_map_path), "success", "static", ["lineage_graph.json"], 0.95)
 
         # 3. ONBOARDING_BRIEF.md
         if extra_context and "onboarding_brief" in extra_context:
@@ -55,14 +60,17 @@ class ArchivistAgent:
             brief_path.write_text(f"# FDE Onboarding Brief\n\n{extra_context['onboarding_brief']}")
             artifacts["onboarding_brief"] = brief_path
             console.print(f"  📋 Onboarding brief generated: {brief_path}")
+            self._log("generate_artifact", str(brief_path), "success", "llm", ["semanticist.answer_questions"], 0.8)
 
         # 4. CODEBASE.md (Living Context)
         codebase_md_path = self.generate_codebase_md()
         artifacts["codebase_md"] = codebase_md_path
+        self._log("generate_artifact", str(codebase_md_path), "success", "static+llm", ["module_graph.json", "lineage_graph.json"], 0.9)
 
         # 5. Interactive Dashboard (Cytoscape)
         dashboard_path = self.generate_dashboard()
         artifacts["dashboard"] = dashboard_path
+        self._log("generate_artifact", str(dashboard_path), "success", "static", ["module_graph.json", "lineage_graph.json"], 0.92)
 
         # 6. Premium Visualizations (Pyvis & Matplotlib)
         premium_viz = self.generate_premium_visualizations()
@@ -92,6 +100,39 @@ class ArchivistAgent:
         """Generate a living context file for AI agents."""
         hubs = self.module_graph.pagerank()
         top_hubs = sorted(hubs.items(), key=lambda x: x[1], reverse=True)[:5]
+
+        lineage_sources = self.lineage_graph.find_sources()[:10]
+        lineage_sinks = self.lineage_graph.find_sinks()[:10]
+
+        # Critical path approximation: top hub to nearest sinks via shortest paths when possible.
+        critical_paths: list[str] = []
+        Gm = self.module_graph.graph
+        for hub, _ in top_hubs[:3]:
+            try:
+                for sink in lineage_sinks[:3]:
+                    if hub in Gm and sink in Gm:
+                        try:
+                            path = nx.shortest_path(Gm, source=hub, target=sink)
+                            if path and len(path) > 1:
+                                critical_paths.append(" -> ".join(path))
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+        # Known debt from circular dependencies + doc drift
+        circular = self.module_graph.strongly_connected_components()[:5]
+        drifted = [
+            n["id"] for n in self.module_graph.get_nodes_by_type("module")
+            if n.get("documentation_drift")
+        ][:10]
+
+        # High velocity files
+        velocity_nodes = sorted(
+            self.module_graph.get_nodes_by_type("module"),
+            key=lambda n: n.get("change_velocity_30d", 0),
+            reverse=True,
+        )[:10]
         
         lines = [
             "# CODEBASE.md — System Context",
@@ -107,11 +148,19 @@ class ArchivistAgent:
             purpose = node.get("purpose_statement", "No purpose statement generated.")
             lines.append(f"- **{path}** (PageRank: {pr:.4f})")
             lines.append(f"  - *Purpose*: {purpose}")
+
+        lines.append("")
+        lines.append("## Critical Path")
+        if critical_paths:
+            for path in critical_paths[:5]:
+                lines.append(f"- {path}")
+        else:
+            lines.append("- Critical path is approximated by top hubs and lineage hotspots; no direct merged shortest-path found.")
             
         lines.append("")
         lines.append("## Data Sources & Sinks")
-        sources = self.lineage_graph.find_sources()[:10]
-        sinks = self.lineage_graph.find_sinks()[:10]
+        sources = lineage_sources
+        sinks = lineage_sinks
         
         lines.append("### Entry Points")
         for s in sources:
@@ -121,11 +170,58 @@ class ArchivistAgent:
         lines.append("### Terminal Outputs")
         for s in sinks:
             lines.append(f"- {s}")
+
+        lines.append("")
+        lines.append("## Known Debt")
+        if circular:
+            lines.append("### Circular Dependencies")
+            for scc in circular:
+                lines.append(f"- {' <-> '.join(scc)}")
+        if drifted:
+            lines.append("### Documentation Drift Hotspots")
+            for mod in drifted:
+                lines.append(f"- {mod}")
+        if not circular and not drifted:
+            lines.append("- No major structural debt detected in this snapshot.")
+
+        lines.append("")
+        lines.append("## High-Velocity Files")
+        if velocity_nodes:
+            for n in velocity_nodes:
+                lines.append(f"- {n.get('id')} (change_velocity_30d={n.get('change_velocity_30d', 0)})")
+        else:
+            lines.append("- No velocity data available.")
+
+        lines.append("")
+        lines.append("## Module Purpose Index")
+        for n in self.module_graph.get_nodes_by_type("module")[:200]:
+            purpose = n.get("purpose_statement") or "Purpose not generated"
+            lines.append(f"- {n.get('id')}: {purpose}")
             
         output_path = self.output_dir / "CODEBASE.md"
         output_path.write_text("\n".join(lines))
         console.print(f"  📝 CODEBASE.md generated: {output_path}")
         return output_path
+
+    def _log(
+        self,
+        action: str,
+        target: str,
+        result: str,
+        analysis_method: str,
+        evidence_sources: list[str],
+        confidence: float,
+    ) -> None:
+        self.trace_log.append({
+            "timestamp": datetime.now().isoformat(),
+            "agent": "archivist",
+            "action": action,
+            "target": target,
+            "result": result,
+            "analysis_method": analysis_method,
+            "evidence_sources": evidence_sources,
+            "confidence": confidence,
+        })
 
     def generate_system_map(self) -> Path:
         """Generate a Mermaid diagram of the module import graph."""

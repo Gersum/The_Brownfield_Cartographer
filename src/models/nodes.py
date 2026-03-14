@@ -39,6 +39,11 @@ class ModuleNode(BaseModel):
     commit_summaries: list[str] = Field(default_factory=list, description="Recent commit messages for this file")
     is_dead_code_candidate: bool = Field(False, description="Exported but never imported")
     documentation_drift: bool = Field(False, description="True if code is out of sync with docs/history")
+    documentation_drift_severity: Optional[str] = Field(None, description="Drift severity: low, medium, or high")
+    documentation_drift_contradictions: list[str] = Field(
+        default_factory=list,
+        description="Specific contradictions between implementation and docs/comments",
+    )
     last_modified: Optional[datetime] = None
     imports: list[str] = Field(default_factory=list, description="List of resolved import paths")
     public_functions: list[str] = Field(default_factory=list, description="Public function names")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -29,6 +30,9 @@ class ContextWindowBudget:
         self._tokenizer = tiktoken.get_encoding("cl100k_base")
         self.tokens_used_this_run = 0
         self.max_tokens = max_tokens_per_minute
+        self.prompt_tokens_total = 0
+        self.response_tokens_total = 0
+        self.estimated_cost_usd = 0.0
 
     def estimate_tokens(self, text: str) -> int:
         return len(self._tokenizer.encode(text))
@@ -40,21 +44,35 @@ class ContextWindowBudget:
         self.tokens_used_this_run += count
         return True
 
+    def record_call(self, prompt_tokens: int, response_tokens: int, cost_per_1k_tokens_usd: float) -> None:
+        """Record token/cost usage for one model call."""
+        self.prompt_tokens_total += max(0, prompt_tokens)
+        self.response_tokens_total += max(0, response_tokens)
+        total = max(0, prompt_tokens) + max(0, response_tokens)
+        self.estimated_cost_usd += (total / 1000.0) * max(0.0, cost_per_1k_tokens_usd)
+
 
 class SemanticistAgent:
     """Agent that adds semantic layers to the knowledge graph using Gemini."""
 
-    def __init__(self, repo_path: str, graph: KnowledgeGraph):
+    def __init__(self, repo_path: str, graph: KnowledgeGraph, lineage_graph: Optional[KnowledgeGraph] = None):
         self.repo_path = Path(repo_path)
         self.graph = graph
+        self.lineage_graph = lineage_graph
         self.budget = ContextWindowBudget()
+        self.trace_log: list[dict[str, Any]] = []
         self._setup_llm()
 
     def _setup_llm(self):
         """Initialize the Ollama client."""
         try:
-            self.flash_model = ChatOllama(model="llama3.1", temperature=0.1)
-            self.pro_model = ChatOllama(model="llama3.1", temperature=0.2)
+            # Cost-conscious model split: cheap model for bulk, pro model for synthesis.
+            self.flash_model_name = os.getenv("CARTOGRAPHER_MODEL_CHEAP", "llama3.1:8b")
+            self.pro_model_name = os.getenv("CARTOGRAPHER_MODEL_PRO", "llama3.1")
+            self.flash_cost_per_1k = float(os.getenv("CARTOGRAPHER_COST_CHEAP_PER_1K", "0.001"))
+            self.pro_cost_per_1k = float(os.getenv("CARTOGRAPHER_COST_PRO_PER_1K", "0.006"))
+            self.flash_model = ChatOllama(model=self.flash_model_name, temperature=0.1)
+            self.pro_model = ChatOllama(model=self.pro_model_name, temperature=0.2)
             self.client = True
         except Exception as e:
             console.print(f"  ⚠️  [orange3]Failed to initialize Ollama: {e}[/orange3]")
@@ -91,8 +109,10 @@ class SemanticistAgent:
             purpose, doc_drift = self._generate_purpose(mod_id)
             if purpose:
                 mod_data["purpose_statement"] = purpose
-                if doc_drift:
+                if doc_drift.get("has_drift"):
                     mod_data["documentation_drift"] = True
+                    mod_data["documentation_drift_severity"] = doc_drift.get("severity")
+                    mod_data["documentation_drift_contradictions"] = doc_drift.get("contradictions", [])
                     drift_count += 1
                 
                 node = ModuleNode(**mod_data)
@@ -113,9 +133,17 @@ class SemanticistAgent:
         
         # 2. Domain Clustering
         self._cluster_domains()
+        self._log(
+            action="semantic_phase_complete",
+            target="module_graph",
+            result=f"updated={updated_count}, drift={drift_count}",
+            analysis_method="llm",
+            evidence_sources=["module_graph.json"],
+            confidence=0.82,
+        )
 
-    def _generate_purpose(self, mod_id: str) -> tuple[Optional[str], bool]:
-        """Generate purpose statement and detect doc drift. Returns (purpose, has_drift)."""
+    def _generate_purpose(self, mod_id: str) -> tuple[Optional[str], dict[str, Any]]:
+        """Generate purpose statement and detect doc drift with structured output."""
         try:
             full_path = self.repo_path / mod_id
             if not full_path.exists() or full_path.is_dir():
@@ -125,7 +153,11 @@ class SemanticistAgent:
             
             # Efficiency: Skip very small files (usually empty __init__ or one-liners)
             if len(code.strip()) < 50:
-                return "Utility/Initialization module.", False
+                return "Utility/Initialization module.", {
+                    "has_drift": False,
+                    "severity": "low",
+                    "contradictions": [],
+                }
 
             # Context Window Budgeting
             tokens = self.budget.estimate_tokens(code)
@@ -135,7 +167,11 @@ class SemanticistAgent:
                 
             if not self.budget.consume(tokens + 500): # +500 for prompt/response
                 console.print(f"  ⚠️  Skipping {mod_id}: Context budget exceeded.")
-                return None, False
+                return None, {
+                    "has_drift": False,
+                    "severity": "low",
+                    "contradictions": [],
+                }
 
             mod_node = self.graph.get_node(mod_id)
             history = ""
@@ -146,7 +182,15 @@ class SemanticistAgent:
 Analyze the following code from file `{mod_id}`.
 Provide TWO things formatted as JSON:
 1. `purpose_statement`: A concise (1-2 sentence) summary of its core purpose in the system. Focus on what it ACTUALLY does based on the code logic, not generic descriptions.
-2. `documentation_drift`: A boolean (true/false) indicating if the code seems out of sync with its own comments/docstrings, or if the history indicates the code evolved significantly but docs didn't.
+2. `documentation_drift`: A structured object with:
+    - `has_drift` (boolean)
+    - `severity` ("low" | "medium" | "high")
+    - `contradictions` (array of specific contradictions between code behavior and comments/docstrings)
+
+IMPORTANT:
+- Ignore generic docstring wording unless contradicted by implementation.
+- Prioritize implementation behavior over comments.
+- Do not invent contradictions that are not supported by code.
 
 {history}
 
@@ -158,10 +202,15 @@ CODE:
 Return ONLY valid JSON in this exact format:
 {{
     "purpose_statement": "...",
-    "documentation_drift": false
+    "documentation_drift": {{
+        "has_drift": false,
+        "severity": "low",
+        "contradictions": []
+    }}
 }}
 """
             # Use Flash for bulk processing
+            prompt_tokens = self.budget.estimate_tokens(prompt)
             response = self.flash_model.invoke(prompt)
             import re
             import json
@@ -190,15 +239,38 @@ Return ONLY valid JSON in this exact format:
 
             data = robust_json_extract(text)
             if data:
-                return data.get("purpose_statement"), data.get("documentation_drift", False)
+                response_tokens = self.budget.estimate_tokens(text)
+                self.budget.record_call(prompt_tokens, response_tokens, self.flash_cost_per_1k)
+                drift = data.get("documentation_drift") or {}
+                if isinstance(drift, bool):
+                    drift = {
+                        "has_drift": drift,
+                        "severity": "medium" if drift else "low",
+                        "contradictions": [],
+                    }
+                drift.setdefault("has_drift", False)
+                drift.setdefault("severity", "low")
+                drift.setdefault("contradictions", [])
+                if not isinstance(drift.get("contradictions"), list):
+                    drift["contradictions"] = [str(drift.get("contradictions"))]
+                drift["contradictions"] = [str(item) for item in drift.get("contradictions", [])]
+                return data.get("purpose_statement"), drift
             
             # Fallback for very messy output (manual string cleaning)
             if 'text' in locals():
                 console.print(f"  ❌ Failed to extract JSON for {mod_id}. Raw: {text[:100]}...")
-            return None, False
+            return None, {
+                "has_drift": False,
+                "severity": "low",
+                "contradictions": [],
+            }
         except Exception as e:
             console.print(f"  ❌ Error for {mod_id}: {e}")
-            return None, False
+            return None, {
+                "has_drift": False,
+                "severity": "low",
+                "contradictions": [],
+            }
 
     def _cluster_domains(self):
         """Identify domain boundaries by embedding purpose statements and clustering."""
@@ -259,7 +331,8 @@ Return ONLY valid JSON in this exact format:
             "critical_hubs": [h[0] for h in top_hubs],
             "data_sources": self.graph.find_sources()[:10],
             "data_sinks": self.graph.find_sinks()[:10],
-            "module_purposes": {}
+            "module_purposes": {},
+            "lineage_evidence": [],
         }
         
         for mod_id in context["critical_hubs"]:
@@ -267,9 +340,30 @@ Return ONLY valid JSON in this exact format:
             if node and node.get("purpose_statement"):
                 context["module_purposes"][mod_id] = node["purpose_statement"]
 
+        if self.lineage_graph:
+            for t in self.lineage_graph.get_nodes_by_type("transformation")[:30]:
+                source_file = t.get("source_file")
+                line_range = t.get("line_range")
+                if not source_file:
+                    continue
+                line = None
+                if isinstance(line_range, (list, tuple)) and line_range:
+                    try:
+                        line = int(line_range[0])
+                    except Exception:
+                        line = None
+                citation = f"{source_file}:{line}" if line is not None else source_file
+                context["lineage_evidence"].append({
+                    "transformation": t.get("id"),
+                    "type": t.get("transformation_type"),
+                    "citation": citation,
+                    "sources": t.get("source_datasets", []),
+                    "targets": t.get("target_datasets", []),
+                })
+
         prompt = f"""
 You are an expert Forward Deployed Engineer (FDE). Based on the Cartographer's analysis, answer the Five Day-One Questions.
-Be highly specific. Cite exact file paths from the context. Do not invent information. 
+Be highly specific. Cite exact file paths with line numbers from the context (format: path:line). Do not invent information.
 
 CONTEXT:
 {json.dumps(context, indent=2)}
@@ -285,8 +379,20 @@ Format your response as a professional Markdown brief.
 """
         try:
             # Use Pro model for deep synthesis
+            prompt_tokens = self.budget.estimate_tokens(prompt)
             response = self.pro_model.invoke(prompt)
-            return {"onboarding_brief": str(response.content).strip()}
+            output_text = str(response.content).strip()
+            response_tokens = self.budget.estimate_tokens(output_text)
+            self.budget.record_call(prompt_tokens, response_tokens, self.pro_cost_per_1k)
+            self._log(
+                action="generate_onboarding_brief",
+                target="onboarding_brief.md",
+                result="success",
+                analysis_method="llm",
+                evidence_sources=["module_graph.json", "lineage_graph.json"],
+                confidence=0.78,
+            )
+            return {"onboarding_brief": output_text}
         except Exception as e:
             console.print(f"  ⚠️  FDE Brief generation failed: {e}")
             return {}
@@ -336,8 +442,51 @@ INSTRUCTIONS:
 - If something is not in the context, say clearly that it is "not in context" rather than guessing.
 """
         try:
+            prompt_tokens = self.budget.estimate_tokens(prompt)
             response = self.pro_model.invoke(prompt)
-            return str(response.content).strip()
+            output_text = str(response.content).strip()
+            response_tokens = self.budget.estimate_tokens(output_text)
+            self.budget.record_call(prompt_tokens, response_tokens, self.pro_cost_per_1k)
+            self._log(
+                action="semantic_ask",
+                target="free_form_question",
+                result="success",
+                analysis_method="llm",
+                evidence_sources=["module_graph.json", "lineage_graph.json"],
+                confidence=0.72,
+            )
+            return output_text
         except Exception as e:
             console.print(f"  ⚠️  Semanticist free-form question failed: {e}")
             return f"Semanticist error: {e}"
+
+    def get_usage_summary(self) -> dict[str, Any]:
+        """Return cumulative token/cost usage for this run."""
+        return {
+            "cheap_model": self.flash_model_name,
+            "pro_model": self.pro_model_name,
+            "prompt_tokens_total": self.budget.prompt_tokens_total,
+            "response_tokens_total": self.budget.response_tokens_total,
+            "tokens_used_this_run": self.budget.tokens_used_this_run,
+            "estimated_cost_usd": round(self.budget.estimated_cost_usd, 6),
+        }
+
+    def _log(
+        self,
+        action: str,
+        target: str,
+        result: str,
+        analysis_method: str,
+        evidence_sources: list[str],
+        confidence: float,
+    ) -> None:
+        self.trace_log.append({
+            "timestamp": datetime.now().isoformat(),
+            "agent": "semanticist",
+            "action": action,
+            "target": target,
+            "result": result,
+            "analysis_method": analysis_method,
+            "evidence_sources": evidence_sources,
+            "confidence": confidence,
+        })
