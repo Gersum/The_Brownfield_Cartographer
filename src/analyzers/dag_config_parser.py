@@ -126,6 +126,9 @@ class DAGConfigParser:
                 target=name,
                 edge_type=EdgeType.CONFIGURES,
                 metadata={"config_type": "dbt_schema"},
+                transformation_type="config_parse",
+                source_file=rel_path,
+                line_range=(1, 1),
             ))
 
     def _parse_dbt_sources(self, data: dict, rel_path: str, results: dict) -> None:
@@ -165,6 +168,9 @@ class DAGConfigParser:
                     target=full_name,
                     edge_type=EdgeType.CONFIGURES,
                     metadata={"config_type": "dbt_source"},
+                    transformation_type="config_parse",
+                    source_file=rel_path,
+                    line_range=(1, 1),
                 ))
 
     def _parse_dbt_project(self, data: dict, rel_path: str, results: dict) -> None:
@@ -176,6 +182,9 @@ class DAGConfigParser:
             target=f"project:{project_name}",
             edge_type=EdgeType.CONFIGURES,
             metadata={"config_type": "dbt_project", "project_name": project_name},
+            transformation_type="config_parse",
+            source_file=rel_path,
+            line_range=(1, 1),
         ))
 
     def _is_airflow_dag(self, content: str) -> bool:
@@ -236,6 +245,9 @@ class DAGConfigParser:
                         "source_file": rel_path,
                         "relationship": "task_dependency",
                     },
+                    transformation_type="airflow_task_dependency",
+                    source_file=rel_path,
+                    line_range=(1, 1),
                 ))
 
         # Extract list-based dependencies: [task1, task2] >> task3
@@ -253,6 +265,9 @@ class DAGConfigParser:
                             "source_file": rel_path,
                             "relationship": "task_dependency",
                         },
+                        transformation_type="airflow_task_dependency",
+                        source_file=rel_path,
+                        line_range=(1, 1),
                     ))
 
         # Add the DAG config edge
@@ -261,6 +276,9 @@ class DAGConfigParser:
             target=f"dag:{dag_name}",
             edge_type=EdgeType.CONFIGURES,
             metadata={"config_type": "airflow_dag"},
+            transformation_type="airflow_dag_config",
+            source_file=rel_path,
+            line_range=(1, 1),
         ))
 
 

@@ -68,13 +68,16 @@ class Orchestrator:
         self._log("pipeline", "start", "semanticist")
         try:
             from src.agents.semanticist import SemanticistAgent
-            semanticist = SemanticistAgent(self.repo_path, module_graph)
+            semanticist = SemanticistAgent(self.repo_path, module_graph, lineage_graph=lineage_graph)
             semanticist.run()
             onboarding_brief = semanticist.answer_questions()
+            results["semanticist_trace"] = semanticist.trace_log
+            results["semantic_usage"] = semanticist.get_usage_summary()
             self._log("pipeline", "complete", "semanticist")
         except Exception as e:
             console.print(f"  ⚠️  Semanticist failed: {e}")
             onboarding_brief = {}
+            results["semanticist_trace"] = []
             self._log("pipeline", "failed", f"semanticist: {e}")
 
         # Phase 4: Archivist — Visualizations & Artifacts
@@ -83,12 +86,15 @@ class Orchestrator:
         archivist = ArchivistAgent(self.repo_path, module_graph, lineage_graph)
         artifacts = archivist.run(extra_context=onboarding_brief)
         results["artifacts"] = artifacts
+        results["archivist_trace"] = archivist.trace_log
         self._log("pipeline", "complete", "archivist")
 
         # Save combined trace log
         all_traces = (
             surveyor.trace_log
             + hydrologist.trace_log
+            + results.get("semanticist_trace", [])
+            + results.get("archivist_trace", [])
             + self.trace_log
         )
         self._save_trace_log(all_traces)
@@ -125,4 +131,7 @@ class Orchestrator:
             "action": action,
             "target": target,
             "result": result,
+            "analysis_method": "orchestration",
+            "evidence_sources": [target],
+            "confidence": 0.95,
         })

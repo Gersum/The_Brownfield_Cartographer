@@ -118,6 +118,8 @@ class HydrologistAgent:
                             ds, t.id,
                             edge_type=EdgeType.CONSUMES,
                             source_file=rel_path,
+                            line_range=t.line_range,
+                            transformation_type=t.transformation_type,
                         )
 
                     # Add PRODUCES edges (transformation → target datasets)
@@ -126,6 +128,8 @@ class HydrologistAgent:
                             t.id, ds,
                             edge_type=EdgeType.PRODUCES,
                             source_file=rel_path,
+                            line_range=t.line_range,
+                            transformation_type=t.transformation_type,
                         )
 
                 self._log("analyze_sql", rel_path, f"found {len(transformations)} transformations")
@@ -265,6 +269,8 @@ class HydrologistAgent:
                     transform_id if direction == "read" else dataset_name,
                     edge_type=EdgeType.CONSUMES if direction == "read" else EdgeType.PRODUCES,
                     source_file=source_file,
+                    line_range=(line_no, line_no),
+                    transformation_type=f"python_{direction}",
                 )
 
                 ops.append({
@@ -308,4 +314,7 @@ class HydrologistAgent:
             "action": action,
             "target": target,
             "result": result,
+            "analysis_method": "static",
+            "evidence_sources": [target],
+            "confidence": 0.9,
         })

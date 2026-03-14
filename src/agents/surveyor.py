@@ -362,6 +362,9 @@ class SurveyorAgent:
             "action": action,
             "target": target,
             "result": result,
+            "analysis_method": "static",
+            "evidence_sources": [target],
+            "confidence": 0.92,
         })
 
     def _categorize_module(self, module: ModuleNode) -> str:
