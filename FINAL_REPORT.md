@@ -14,6 +14,82 @@ This report consolidates the interim progress with the new capabilities added si
 
 ---
 
+## Manual Reconnaissance Depth (Standalone Ground Truth)
+
+This section records the hand-conducted Day-One analysis used as ground truth before automation.
+
+- **Chosen target codebase**: `dbt-labs/jaffle_shop`
+- **Manual evidence source**: `RECONNAISSANCE.md`
+
+### Q1. Primary data ingestion path
+
+Primary ingestion occurs through dbt seeds in `seeds/`:
+
+- `seeds/raw_customers.csv` -> dataset `raw_customers`
+- `seeds/raw_orders.csv` -> dataset `raw_orders`
+- `seeds/raw_payments.csv` -> dataset `raw_payments`
+
+These are the only external inputs in the project and feed all downstream staging/final models.
+
+### Q2. 3-5 most critical output datasets/endpoints
+
+Most critical outputs identified manually:
+
+1. `customers` in `models/customers.sql` (final customer analytics table: LTV, order counts, first/last order dates).
+2. `orders` in `models/orders.sql` (order-level fact output with payment rollups/status).
+3. `stg_customers` in `models/staging/stg_customers.sql` (critical cleaned upstream dependency).
+4. `stg_orders` in `models/staging/stg_orders.sql` (critical cleaned upstream dependency).
+5. `stg_payments` in `models/staging/stg_payments.sql` (critical cleaned upstream dependency).
+
+### Q3. Blast radius of the most critical module
+
+Manual blast-radius assessment for `models/staging/stg_orders.sql`:
+
+- Direct downstream break: `models/orders.sql`
+- Indirect downstream break: `models/customers.sql`
+- Practical impact: core analytical outputs (`orders`, `customers`) become unavailable.
+
+If ingestion table `raw_orders` fails, the same cascade occurs: `raw_orders` -> `stg_orders` -> `orders` -> `customers`.
+
+### Q4. Where business logic is concentrated vs. distributed
+
+Manual conclusion:
+
+- **Concentrated logic**:
+  - `models/customers.sql` (multi-CTE aggregation for customer metrics/LTV)
+  - `models/orders.sql` (payment aggregation/status and order-level joins)
+- **Distributed low-complexity prep**:
+  - Staging layer under `models/staging/` (`stg_customers.sql`, `stg_orders.sql`, `stg_payments.sql`) primarily performs rename/cleaning transformations.
+
+### Q5. What changed most frequently in the last 90 days
+
+Manual git-velocity reading:
+
+- Project is stable with low recent code churn.
+- Historically most-touched files are non-core SQL assets (notably `README.md` and `dbt_project.yml`).
+- Core SQL model files under `models/` show near-zero recent change velocity.
+
+### Difficulty Analysis (What Was Hardest Manually)
+
+Hardest manual tasks and why they matter architecturally:
+
+1. **Tracing deep CTE flows in `models/customers.sql`**.
+  Manual reconstruction across chained CTEs (`customers`, `orders`, `payments`, `customer_orders`, `customer_payments`, `final`) was slow and error-prone.
+2. **Resolving dbt `ref()` links across files without compiled docs**.
+  Mapping `ref('stg_orders')`/`ref('stg_customers')` to actual source files required repetitive cross-file navigation.
+3. **Inferring schema and transformation intent from mixed SQL + YAML context**.
+  `models/schema.yml` validates columns/tests but does not fully expose transformation semantics, forcing parallel reading of SQL and YAML.
+
+Connection to automation priorities in this project:
+
+- Prioritized graph extraction for model dependencies and lineage (`sql_lineage.py`, `dag_config_parser.py`).
+- Prioritized central graph analytics for impact traversal/blast radius (`knowledge_graph.py`).
+- Prioritized semantic summarization into onboarding artifacts to replace fragile manual synthesis (`semanticist.py`, `onboarding_brief.md`).
+
+This section is intentionally standalone and serves as manual baseline evidence independent of system-generated outputs.
+
+---
+
 ## 1. Architecture Overview
 
 The core architecture is a **four‑agent pipeline** orchestrated by `Orchestrator`, with shared storage in a SQLite‑backed `KnowledgeGraph` and multiple interaction surfaces (CLI, dashboard, Navigator).
@@ -362,32 +438,146 @@ This is ideal for:
     - Forgotten dead‑code candidates in experimental scripts.
   - Demonstrates the system’s ability to **challenge human assumptions** and reveal hidden couplings.
 
+### 7.2 System vs. Manual Ground Truth (Q1-Q5 Verdict Matrix)
+
+The table below compares automated output against the manual baseline in `RECONNAISSANCE.md` for each FDE Day-One question.
+
+Verdict legend: **Correct** = matches manual ground truth with sufficient evidence; **Partial** = directionally correct but missing important detail; **Incorrect** = materially inconsistent with manual ground truth.
+
+| FDE Day-One Question | Manual Ground Truth (Evidence) | System Output (Evidence) | Verdict | Root Cause if not fully correct |
+|---|---|---|---|---|
+| Q1. Primary ingestion path | Seeds: `seeds/raw_customers.csv`, `seeds/raw_orders.csv`, `seeds/raw_payments.csv` -> `raw_*` datasets | `LINEAGE_MAP.md` and lineage graph identify seed-backed source datasets and downstream refs | **Correct** | N/A |
+| Q2. 3-5 critical outputs | `models/customers.sql`, `models/orders.sql`, plus critical staging dependencies in `models/staging/` | `SYSTEM_MAP.md`/PageRank consistently elevate `customers.sql`, `orders.sql`, and staging nodes as structural hubs | **Correct** | N/A |
+| Q3. Blast radius of most critical module | Failure chain manually traced: `stg_orders` -> `orders` -> `customers` | `Navigator.trace_lineage`/`blast_radius` reproduces downstream chain from `stg_orders` and seed failures | **Correct** | N/A |
+| Q4. Concentrated vs distributed business logic | Concentrated in `models/customers.sql` and `models/orders.sql`; staging mostly rename/cleaning | Semantic summaries identify concentration in final models, but CTE-level nuance is sometimes compressed | **Partial** | LLM summarization is high-level; no native CTE-level semantic scoring in current pipeline |
+| Q5. Most frequent changes in last 90 days | Low churn in SQL models; relatively higher historical touches in `README.md` and `dbt_project.yml` | Surveyor git velocity shows near-zero churn in core models and surfaces non-core file activity | **Correct** | N/A |
+
+Incorrect verdict count in this evaluation: **0** (no fully incorrect Day-One answers observed).
+
+### 7.3 Failure Attribution Notes
+
+- **Only partial question: Q4**.
+- **Immediate technical cause**: Semanticist summarizes module intent from bounded context and does not yet compute explicit CTE-level logic concentration metrics.
+- **Observed effect**: Architectural conclusion is directionally correct but may miss finer-grained intra-file transformation details.
+- **Planned mitigation**: add SQL-structure-aware concentration scoring (CTE counts, join density, aggregation density) and include these metrics in `module_graph.json` for deterministic reporting.
+
 ---
 
-## 8. FDE Usage Patterns
+## 8. Deployment Plan and Operating Scenario
 
-The system now supports FDE workflows across three phases:
+This section describes how Cartographer is deployed in a real FDE engagement, with explicit operator steps, ownership, and outputs.
 
-- **Minutes 1–3: Cold Start & Impact Awareness**
-  - Run `analyze` on an unfamiliar repo.
-  - Skim `CODEBASE.md`, `SYSTEM_MAP.md`, and `LINEAGE_MAP.md`.
-  - Use Navigator or Hydrologist blast‑radius functions before touching code.
+### 8.1 Operating Context
 
-- **Minutes 4–6: Day‑One Mastery**
-  - Read `onboarding_brief.md` and verify its claims by navigating to cited files.
-  - Inject `CODEBASE.md` into AI coding sessions for context‑aware assistance.
-  - Use `semantic-ask` to answer targeted architecture questions from the terminal.
+- **Engagement type**: new FDE joining an active client codebase with mixed SQL/Python/Airflow assets.
+- **Execution cadence**: one full cold-start run, then incremental updates tied to PR merges or daily sync windows.
+- **Owner model**:
+  - FDE owns day-to-day usage (`analyze --incremental`, Navigator queries, validation checks).
+  - Tech lead/architect reviews high-risk blast-radius findings before major changes.
 
-- **Ongoing: Living Cartography**
-  - Re‑run `analyze --incremental` as the system evolves.
-  - Rely on Navigator and Semanticist for:
-    - Locating implementation hotspots.
-    - Evaluating refactor risk.
-    - Keeping docs and mental models synchronized with reality.
+### 8.2 Cold-Start Workflow (Day 0 to Day 1)
+
+1. **Initialize target and baseline artifacts**
+  - Run full analysis on the client repo root.
+  - Produce baseline outputs: `module_graph.json`, `lineage_graph.json`, `SYSTEM_MAP.md`, `LINEAGE_MAP.md`, `CODEBASE.md`, `onboarding_brief.md`, `dashboard.html`.
+2. **Run a 30-minute triage review**
+  - FDE and lead inspect top hubs, major sources/sinks, and unresolved lineage references.
+  - Mark critical modules/datasets requiring immediate human verification.
+3. **Create first working brief for delivery team**
+  - Convert baseline findings into a Day-One onboarding brief for the client squad.
+  - Include scope boundaries (what was inferred vs what remains uncertain).
+
+### 8.3 Ongoing Exploration with Navigator (Week 1+)
+
+Navigator is used as the interactive analysis loop during implementation:
+
+1. Before editing a module, run `blast_radius` to estimate downstream impact.
+2. For data changes, run `trace_lineage` upstream and downstream to identify affected producers/consumers.
+3. For unclear ownership/intent, run `find_implementation` and `explain_module` to locate code and summarize semantics.
+4. Record key query outcomes in task notes/PR descriptions (for example: impacted models, datasets, and risk level).
+
+This turns Navigator from a demo tool into a daily risk-screening checkpoint.
+
+### 8.4 How `CODEBASE.md` Is Maintained
+
+`CODEBASE.md` is treated as a living contract, not a static artifact:
+
+1. Regenerate on every scheduled incremental run (daily or per merged PR batch).
+2. Compare against prior version to detect hub shifts, new sources/sinks, and major semantic drift.
+3. Require FDE sign-off when high-centrality hubs change unexpectedly.
+4. Publish the latest `CODEBASE.md` to the team knowledge surface (repo docs space or onboarding packet).
+
+Operational rule: if `CODEBASE.md` is older than the current release branch state, semantic answers are treated as advisory only.
+
+### 8.5 Manual Tasks That Remain (Human-in-the-Loop)
+
+Even with automation, these tasks remain manual and explicit:
+
+1. Validate business meaning of high-impact datasets with domain stakeholders.
+2. Resolve dynamic/runtime-only references that static analyzers cannot fully bind.
+3. Approve architectural decisions when blast-radius analysis indicates high client risk.
+4. Verify whether semantically summarized intent matches actual product behavior in edge cases.
+
+### 8.6 How Outputs Feed Client Deliverables
+
+Cartographer outputs map to concrete client-facing artifacts:
+
+1. **Architecture readout deck**: uses `SYSTEM_MAP.md` + top-hub summaries from `CODEBASE.md`.
+2. **Data dependency briefing**: uses `LINEAGE_MAP.md` + traced blast-radius chains.
+3. **Onboarding packet for new engineers**: uses `onboarding_brief.md` + curated dashboard views.
+4. **Change-risk appendix for major PRs/releases**: uses Navigator query logs and unresolved-reference counts.
+
+Delivery cadence recommendation:
+
+- Weekly architecture sync: refreshed maps and hub changes.
+- Per-release risk review: blast-radius and lineage delta summary.
+
+### 8.7 Success Criteria for Deployment
+
+- Reduced time-to-first-safe-change for new FDEs.
+- Fewer surprise downstream breakages after schema/model updates.
+- Faster client onboarding handoff due to reusable, regenerated artifacts.
 
 ---
 
-### 9. Potential Extensions
+## 9. Limitations, Confidence, and Constraint Taxonomy
+
+### 9.1 Confidence Model and False-Confidence Controls
+
+Known false-confidence risk: presenting partially inferred lineage as complete when dynamic references exist.
+
+Current controls:
+
+- Dynamic/unresolvable references (for example f-strings and variable-built paths) are logged to trace output instead of being silently converted into hard lineage edges.
+- Semanticist is instructed to admit unknowns when context is insufficient.
+- Reports include scope notes for sampled/filtered visualizations (top-N maps).
+
+Remaining risk:
+
+- Users may still over-trust clean visual outputs unless uncertainty counts are surfaced prominently.
+
+Next control to add:
+
+- Per-artifact uncertainty summary (`resolved_edges`, `unresolved_references`, `coverage_ratio`) rendered in `LINEAGE_MAP.md`, `SYSTEM_MAP.md`, and dashboard header.
+
+### 9.2 Fixable Engineering Gaps vs Fundamental Constraints
+
+**Fixable engineering gaps (roadmap items):**
+
+1. Column-level lineage extraction for supported SQL patterns.
+2. Better handling of dynamic references through partial evaluation and pattern libraries.
+3. CTE-level semantic scoring to improve Q4-style business-logic concentration judgments.
+4. Confidence scoring UX (explicit uncertainty badges and warnings in CLI/dashboard).
+
+**Fundamental architectural constraints (cannot be fully eliminated):**
+
+1. Some runtime behavior is undecidable statically (dynamic SQL assembled from external runtime state).
+2. Incomplete observability when repositories depend on external systems not represented in code/config.
+3. LLM semantic summaries remain probabilistic and may compress nuance even with good prompts/context.
+
+Design implication: treat Cartographer output as high-value decision support with explicit uncertainty, not as an oracle.
+
+### 9.3 Potential Extensions
 
 - Column‑level lineage where SQL structure permits it.
 - Domain‑based grouping and filtering in the dashboard based on `domain_cluster` labels.
