@@ -31,7 +31,9 @@ def main():
 @click.argument("repo_path")
 @click.option("--output", "-o", default=None,
               help="Output directory (default: <repo>/.cartography)")
-def analyze(repo_path: str, output: str | None):
+@click.option("--incremental", "-i", is_flag=True,
+              help="Use incremental mode (only analyze files changed since last run via git diff)")
+def analyze(repo_path: str, output: str | None, incremental: bool):
     """Analyze a codebase and generate the cartography artifacts.
     
     REPO_PATH can be a local directory or a GitHub URL.
@@ -45,7 +47,7 @@ def analyze(repo_path: str, output: str | None):
         sys.exit(1)
 
     # Run the analysis
-    orchestrator = Orchestrator(actual_path, output_dir=output)
+    orchestrator = Orchestrator(actual_path, output_dir=output, incremental=incremental)
     try:
         results = orchestrator.run()
     except Exception as e:
@@ -57,13 +59,94 @@ def analyze(repo_path: str, output: str | None):
 
 @main.command()
 @click.argument("repo_path")
+@click.option("--output", "-o", default=None,
+              help="Output directory (default: <repo>/.cartography)")
+def visualize(repo_path: str, output: str | None):
+    """Re-generate premium visualizations for an analyzed codebase."""
+    from src.graph.knowledge_graph import KnowledgeGraph
+    from src.agents.archivist import ArchivistAgent
+    
+    actual_path = _resolve_repo_path(repo_path)
+    if actual_path is None:
+        console.print("[red]Error: Could not resolve repo path[/red]")
+        sys.exit(1)
+        
+    output_dir = Path(output) if output else Path(actual_path) / ".cartography"
+    
+    # Load existing graphs
+    module_graph_path = output_dir / "module_graph.json"
+    lineage_graph_path = output_dir / "lineage_graph.json"
+    
+    if not module_graph_path.exists():
+        console.print(f"[red]Error: Graph not found at {module_graph_path}. Run 'analyze' first.[/red]")
+        sys.exit(1)
+        
+    console.print(f"[cyan]Loading graphs from {output_dir}...[/cyan]")
+    module_graph = KnowledgeGraph.load(module_graph_path)
+    lineage_graph = KnowledgeGraph.load(lineage_graph_path)
+    
+    archivist = ArchivistAgent(actual_path, module_graph, lineage_graph)
+    archivist.generate_premium_visualizations()
+    console.print("[green]Premium visualizations updated.[/green]")
+
+
+@main.command()
+@click.argument("repo_path")
 def query(repo_path: str):
     """Launch interactive query mode (Navigator agent).
     
     Requires a previously analyzed codebase.
     """
-    console.print("[yellow]Query mode is coming in the final submission.[/yellow]")
-    console.print("For now, use the JSON files in .cartography/ to explore the results.")
+    from src.agents.navigator import NavigatorAgent
+    
+    actual_path = _resolve_repo_path(repo_path)
+    if actual_path is None:
+        console.print("[red]Error: Could not resolve repo path[/red]")
+        sys.exit(1)
+        
+    navigator = NavigatorAgent(actual_path)
+    navigator.run_interactive()
+
+
+@main.command()
+@click.argument("repo_path")
+@click.option(
+    "-q",
+    "--question",
+    required=True,
+    help="Free-form architecture question for the Semanticist agent.",
+)
+def semantic_ask(repo_path: str, question: str):
+    """Ask the Semanticist agent a free-form question about an analyzed repo.
+
+    Requires that `analyze` has already been run so the module graph exists.
+    """
+    from src.graph.knowledge_graph import KnowledgeGraph
+    from src.agents.semanticist import SemanticistAgent
+
+    actual_path = _resolve_repo_path(repo_path)
+    if actual_path is None:
+        console.print("[red]Error: Could not resolve repo path[/red]")
+        sys.exit(1)
+
+    output_dir = Path(actual_path) / ".cartography"
+    module_graph_path = output_dir / "module_graph.json"
+
+    if not module_graph_path.exists():
+        console.print(
+            f"[red]Error: Module graph not found at {module_graph_path}. "
+            "Run 'analyze' first.[/red]"
+        )
+        sys.exit(1)
+
+    console.print(f"[cyan]Loading module graph from {module_graph_path}...[/cyan]")
+    module_graph = KnowledgeGraph.load(module_graph_path)
+
+    semanticist = SemanticistAgent(str(actual_path), module_graph)
+    answer = semanticist.ask(question)
+
+    console.print("\n[bold magenta]🧠 Semanticist Answer[/bold magenta]\n")
+    console.print(answer)
 
 
 def _resolve_repo_path(repo_path: str) -> Path | None:

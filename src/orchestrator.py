@@ -23,8 +23,9 @@ console = Console()
 class Orchestrator:
     """Runs the full Cartographer analysis pipeline."""
 
-    def __init__(self, repo_path: str | Path, output_dir: Optional[str | Path] = None):
+    def __init__(self, repo_path: str | Path, output_dir: Optional[str | Path] = None, incremental: bool = False):
         self.repo_path = Path(repo_path).resolve()
+        self.incremental = incremental
         if output_dir:
             self.output_dir = Path(output_dir).resolve()
         else:
@@ -48,7 +49,7 @@ class Orchestrator:
         # Phase 1: Surveyor — Static Structure
         self._log("pipeline", "start", "surveyor")
         surveyor = SurveyorAgent(self.repo_path)
-        module_graph = surveyor.run()
+        module_graph = surveyor.run(incremental=self.incremental, output_dir=self.output_dir)
         surveyor.save(self.output_dir)
         results["module_graph"] = module_graph
         results["surveyor_trace"] = surveyor.trace_log
@@ -63,13 +64,24 @@ class Orchestrator:
         results["hydrologist_trace"] = hydrologist.trace_log
         self._log("pipeline", "complete", "hydrologist")
 
-        # Phase 3: Archivist — Visualizations & Artifacts
+        # Phase 3: Semanticist — Meaning & Purpose
+        self._log("pipeline", "start", "semanticist")
+        try:
+            from src.agents.semanticist import SemanticistAgent
+            semanticist = SemanticistAgent(self.repo_path, module_graph)
+            semanticist.run()
+            onboarding_brief = semanticist.answer_questions()
+            self._log("pipeline", "complete", "semanticist")
+        except Exception as e:
+            console.print(f"  ⚠️  Semanticist failed: {e}")
+            onboarding_brief = {}
+            self._log("pipeline", "failed", f"semanticist: {e}")
+
+        # Phase 4: Archivist — Visualizations & Artifacts
         self._log("pipeline", "start", "archivist")
         from src.agents.archivist import ArchivistAgent
         archivist = ArchivistAgent(self.repo_path, module_graph, lineage_graph)
-        artifacts = archivist.run()
-        results["artifacts"] = artifacts
-        self._log("pipeline", "complete", "archivist")
+        artifacts = archivist.run(extra_context=onboarding_brief)
         results["artifacts"] = artifacts
         self._log("pipeline", "complete", "archivist")
 
