@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Brownfield Cartographer — Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.26.0/cytoscape.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --panel: rgba(20, 20, 35, 0.7);
+            --accent: #00f2ff;
+            --accent-glow: rgba(0, 242, 255, 0.3);
+            --magenta: #ff00ff;
+            --orange: #ff9966;
+            --text: #e0e0e0;
+            --text-dim: #9090a0;
+            --glass-border: rgba(255, 255, 255, 0.1);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+        }
+
+        /* --- UI Overlay --- */
+        #ui-overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            padding: 24px;
+            background: linear-gradient(to bottom, rgba(10, 10, 15, 0.9), transparent);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            pointer-events: auto;
+        }
+
+        h1 {
+            font-weight: 600;
+            font-size: 24px;
+            letter-spacing: -0.5px;
+            background: linear-gradient(45deg, var(--accent), var(--magenta));
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        h1::before {
+            content: '🗺️';
+            -webkit-text-fill-color: initial;
+        }
+
+        .controls {
+            display: flex;
+            gap: 12px;
+        }
+
+        button {
+            background: var(--panel);
+            border: 1px solid var(--glass-border);
+            color: var(--text);
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: 500;
+            transition: all 0.2s;
+            backdrop-filter: blur(10px);
+        }
+
+        button:hover {
+            border-color: var(--accent);
+            box-shadow: 0 0 15px var(--accent-glow);
+        }
+
+        button.active {
+            background: var(--accent);
+            color: var(--bg);
+            border-color: var(--accent);
+        }
+
+        /* --- Pattern Menu --- */
+        .pattern-menu {
+            display: flex;
+            gap: 8px;
+            margin-left: 24px;
+            padding-left: 24px;
+            border-left: 1px solid var(--glass-border);
+        }
+
+        .pattern-btn {
+            background: rgba(255, 255, 255, 0.05);
+            font-size: 12px;
+            padding: 6px 12px;
+        }
+
+        .pattern-btn[data-pattern="scc"].active { background: #ff4444; color: white; border-color: #ff4444; }
+        .pattern-btn[data-pattern="utility"].active { background: #4caf50; color: white; border-color: #4caf50; }
+        .pattern-btn[data-pattern="god"].active { background: #ffeb3b; color: black; border-color: #ffeb3b; }
+        .pattern-btn[data-pattern="isolated"].active { background: #9090a0; color: white; border-color: #9090a0; }
+
+        /* --- Panel System --- */
+        .sidebar {
+            position: absolute;
+            right: 24px;
+            top: 100px;
+            bottom: 24px;
+            width: 380px;
+            background: var(--panel);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--glass-border);
+            border-radius: 16px;
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            padding: 24px;
+            transform: translateX(420px);
+            transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+        }
+
+        .sidebar.visible { transform: translateX(0); }
+
+        .detail-header {
+            margin-bottom: 24px;
+        }
+
+        .node-type {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            text-transform: uppercase;
+            color: var(--accent);
+            letter-spacing: 1px;
+            margin-bottom: 4px;
+        }
+
+        .node-id {
+            font-size: 20px;
+            font-weight: 600;
+            word-break: break-all;
+        }
+
+        .detail-content {
+            flex: 1;
+            overflow-y: auto;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        .detail-section {
+            margin-bottom: 24px;
+        }
+
+        .detail-label {
+            color: var(--text-dim);
+            font-size: 12px;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+        }
+
+        .purpose-box {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 16px;
+            border-radius: 12px;
+            border-left: 3px solid var(--accent);
+            font-style: italic;
+        }
+
+        .stat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .stat-pill {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 12px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-val {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+            font-size: 16px;
+            color: var(--accent);
+        }
+
+        .stat-lab {
+            font-size: 10px;
+            color: var(--text-dim);
+        }
+
+        /* --- Graph Canvas --- */
+        #cy {
+            flex: 1;
+            height: 100%;
+            z-index: 1;
+        }
+
+        .loading-overlay {
+            position: fixed;
+            inset: 0;
+            background: var(--bg);
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.5s;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid var(--glass-border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* --- Graph Legend --- */
+        .legend {
+            position: absolute;
+            left: 24px;
+            bottom: 24px;
+            background: var(--panel);
+            backdrop-filter: blur(10px);
+            padding: 16px;
+            border-radius: 12px;
+            border: 1px solid var(--glass-border);
+            pointer-events: auto;
+            font-size: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .legend-item { display: flex; align-items: center; gap: 8px; }
+        .dot { width: 10px; height: 10px; border-radius: 50%; }
+    </style>
+</head>
+<body>
+    <div id="loading" class="loading-overlay">
+        <div class="spinner"></div>
+        <p style="margin-top: 16px; color: var(--text-dim);">Parsing Knowledge Graph...</p>
+    </div>
+
+    <div id="ui-overlay">
+        <header>
+            <h1>The Brownfield Cartographer</h1>
+            <div class="controls">
+                <button id="view-module" class="active">Module Graph</button>
+                <button id="view-lineage">Data Lineage</button>
+                <div class="pattern-menu" id="pattern-menu">
+                    <button class="pattern-btn" data-pattern="scc" title="Circular Dependencies">🔄 Cycles</button>
+                    <button class="pattern-btn" data-pattern="utility" title="High In-Degree (Widely Used)">🧩 Core Utilities</button>
+                    <button class="pattern-btn" data-pattern="god" title="High Out-Degree (Orchestrators)">👑 God Objects</button>
+                    <button class="pattern-btn" data-pattern="isolated" title="Zero Dependencies">🏝️ Isolated</button>
+                </div>
+            </div>
+        </header>
+
+        <div id="sidebar" class="sidebar">
+            <div class="detail-header">
+                <div id="node-type" class="node-type">Module</div>
+                <div id="node-id" class="node-id">n/a</div>
+            </div>
+            <div class="detail-content">
+                <div class="detail-section">
+                    <div class="detail-label">Semantic Purpose</div>
+                    <div id="node-purpose" class="purpose-box">
+                        Select a node to see its AI-generated purpose statement.
+                    </div>
+                </div>
+                <div class="detail-section">
+                    <div class="detail-label">System Metrics</div>
+                    <div class="stat-grid">
+                        <div class="stat-pill">
+                            <div id="stat-rank" class="stat-val">—</div>
+                            <div class="stat-lab">PageRank</div>
+                        </div>
+                        <div class="stat-pill">
+                            <div id="stat-velocity" class="stat-val">—</div>
+                            <div class="stat-lab">30d Velocity</div>
+                        </div>
+                        <div class="stat-pill">
+                            <div id="stat-complexity" class="stat-val">—</div>
+                            <div class="stat-lab">Complexity</div>
+                        </div>
+                        <div class="stat-pill">
+                            <div id="stat-impact" class="stat-val">—</div>
+                            <div class="stat-lab">Blast Radius</div>
+                        </div>
+                    </div>
+                </div>
+                <div id="node-drift-alarm" class="detail-section" style="display: none;">
+                    <div style="background: rgba(255, 100, 100, 0.1); border: 1px solid #ff6464; padding: 12px; border-radius: 8px; color: #ff6464;">
+                        ⚠️ Documentation Drift Detected
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="legend" id="legend-module">
+            <div class="legend-item"><span class="dot" style="background: var(--orange);"></span> Critical Hub (High PageRank)</div>
+            <div class="legend-item"><span class="dot" style="background: var(--accent);"></span> Python / Logic Module</div>
+            <div class="legend-item"><span class="dot" style="background: var(--magenta);"></span> SQL Data Model</div>
+            <div class="legend-item" style="opacity: 0.5;"><span class="dot" style="background: repeating-linear-gradient(45deg, #444, #444 5px, transparent 5px, transparent 10px);"></span> Dead Code Candidate</div>
+        </div>
+        
+        <div class="legend" id="legend-lineage" style="display: none;">
+            <div class="legend-item"><span class="dot" style="background: #4caf50; border-radius: 0;"></span> Raw Source Table</div>
+            <div class="legend-item"><span class="dot" style="background: #9090a0; border-radius: 0;"></span> Intermediate Table</div>
+            <div class="legend-item"><span class="dot" style="background: #e91e63; border-radius: 0;"></span> Terminal Sink</div>
+            <div class="legend-item"><span class="dot" style="background: var(--magenta);"></span> Transformation Logic</div>
+        </div>
+    </div>
+
+    <div id="cy"></div>
+
+    <script>
+        // DATA WILL BE INJECTED HERE
+        const MODULE_DATA = __MODULE_DATA__;
+        const LINEAGE_DATA = __LINEAGE_DATA__;
+
+        let cy;
+        const sidebar = document.getElementById('sidebar');
+
+        function initGraph(data, type) {
+            const elements = convertData(data, type);
+            
+            const isLineage = type === 'lineage';
+
+            const layoutOptions = isLineage
+                ? {
+                    name: 'dagre',
+                    rankDir: 'LR',
+                    nodeSep: 120,
+                    rankSep: 180,
+                    edgeSep: 80
+                }
+                : {
+                    name: 'cose',
+                    idealEdgeLength: 160,
+                    nodeOverlap: 10,
+                    nodeRepulsion: 800000,
+                    gravity: 80,
+                    numIter: 2500,
+                    initialTemp: 200,
+                    coolingFactor: 0.95,
+                    minTemp: 1.0,
+                    padding: 80
+                };
+
+            cy = cytoscape({
+                container: document.getElementById('cy'),
+                elements: elements,
+                style: [
+                    {
+                        selector: 'node',
+                        style: {
+                            'label': 'data(label)',
+                            'color': '#fff',
+                            'font-family': 'Outfit',
+                            'font-size': '10px',
+                            'text-valign': 'bottom',
+                            'text-margin-y': '8px',
+                            'background-color': '#444',
+                            'width': '30px',
+                            'height': '30px',
+                            'transition-property': 'background-color, line-color, target-arrow-color',
+                            'transition-duration': '0.3s'
+                        }
+                    },
+                    {
+                        selector: 'node[node_type="module"][language="python"], node[node_type="module"][language="Python"]',
+                        style: {
+                            'background-color': '#00f2ff',
+                            'shape': 'round-rectangle'
+                        }
+                    },
+                    {
+                        selector: 'node[node_type="module"][language="sql"], node[node_type="module"][language="SQL"]',
+                        style: {
+                            'background-color': '#ff00ff',
+                            'shape': 'diamond'
+                        }
+                    },
+                    {
+                        selector: 'node[node_type="module"][language="yaml"], node[node_type="module"][language="yml"]',
+                        style: {
+                            'background-color': '#9c27b0',
+                            'shape': 'hexagon'
+                        }
+                    },
+                    {
+                        selector: 'node[is_dead_code_candidate="true"]',
+                        style: {
+                            'background-opacity': 0.3,
+                            'border-width': 2,
+                            'border-style': 'dashed',
+                            'border-color': '#ff4444'
+                        }
+                    },
+                    {
+                        selector: 'node[node_type="dataset"]',
+                        style: {
+                            'background-color': '#9090a0',
+                            'shape': 'cylinder'
+                        }
+                    },
+                    {
+                        selector: 'node[is_source="true"]',
+                        style: {
+                            'background-color': '#4caf50',
+                            'shape': 'cylinder',
+                            'border-width': 3,
+                            'border-color': '#81c784'
+                        }
+                    },
+                    {
+                        selector: 'node[is_sink="true"]',
+                        style: {
+                            'background-color': '#e91e63',
+                            'shape': 'cylinder',
+                            'border-width': 3,
+                            'border-color': '#f48fb1'
+                        }
+                    },
+                    {
+                        selector: 'node[node_type="transformation"]',
+                        style: {
+                            'background-color': '#ff00ff',
+                            'shape': 'rectangle'
+                        }
+                    },
+                    {
+                        selector: 'node[is_critical]',
+                        style: {
+                            'background-color': '#ff9966',
+                            'width': '45px',
+                            'height': '45px',
+                            'border-width': '4px',
+                            'border-color': 'rgba(255, 153, 102, 0.3)',
+                            'font-size': '12px',
+                            'font-weight': 'bold'
+                        }
+                    },
+                    {
+                        selector: 'edge',
+                        style: {
+                            'width': 2,
+                            'line-color': 'rgba(255, 255, 255, 0.1)',
+                            'target-arrow-color': 'rgba(255, 255, 255, 0.1)',
+                            'target-arrow-shape': 'triangle',
+                            'curve-style': 'bezier'
+                        }
+                    },
+                    {
+                        selector: ':selected',
+                        style: {
+                            'background-color': '#fff',
+                            'line-color': '#fff',
+                            'target-arrow-color': '#fff',
+                            'width': 4
+                        }
+                    },
+                    {
+                        selector: '.dimmed',
+                        style: {
+                            'opacity': 0.1
+                        }
+                    },
+                    {
+                        selector: '.highlighted',
+                        style: {
+                            'opacity': 1,
+                            'line-color': '#00f2ff',
+                            'target-arrow-color': '#00f2ff',
+                            'width': 3
+                        }
+                    },
+                    {
+                        selector: 'node.pattern-scc',
+                        style: {
+                            'border-width': 4,
+                            'border-color': '#ff4444',
+                            'background-color': '#ffaaaa',
+                            'box-shadow': '0 0 15px #ff4444'
+                        }
+                    },
+                    {
+                        selector: 'edge.pattern-scc',
+                        style: {
+                            'line-color': '#ff4444',
+                            'target-arrow-color': '#ff4444',
+                            'width': 3,
+                            'opacity': 1
+                        }
+                    },
+                    {
+                        selector: 'node.pattern-utility',
+                        style: {
+                            'border-width': 4,
+                            'border-color': '#4caf50',
+                            'background-color': '#a5d6a7',
+                            'box-shadow': '0 0 15px #4caf50',
+                            'width': '40px',
+                            'height': '40px'
+                        }
+                    },
+                    {
+                        selector: 'node.pattern-god',
+                        style: {
+                            'border-width': 4,
+                            'border-color': '#ffeb3b',
+                            'background-color': '#fff59d',
+                            'box-shadow': '0 0 15px #ffeb3b',
+                            'width': '50px',
+                            'height': '50px'
+                        }
+                    },
+                    {
+                        selector: 'node.pattern-isolated',
+                        style: {
+                            'opacity': 0.3,
+                            'border-style': 'double',
+                            'border-width': 2,
+                            'border-color': '#9090a0'
+                        }
+                    }
+                ],
+                layout: layoutOptions
+            });
+
+            cy.on('tap', 'node', function(evt){
+                const node = evt.target;
+                showDetails(node.data());
+                highlightDependencies(node);
+            });
+
+            cy.on('tap', function(evt){
+                if(evt.target === cy) {
+                    sidebar.classList.remove('visible');
+                    cy.elements().removeClass('dimmed highlighted');
+                }
+            });
+        }
+
+        function convertData(data, type) {
+            const elements = { nodes: [], edges: [] };
+            
+            // Nodes
+            const nodes = data.graph.nodes || [];
+            const edges = data.graph.edges || data.graph.links || [];
+
+            nodes.forEach(n => {
+                const label = n.id.split('/').pop().split(':').shift();
+                
+                // Determine dataset source/sink status from edge analysis
+                let isSource = false;
+                let isSink = false;
+                
+                if (type === 'lineage' && n.node_type === 'dataset') {
+                    // Check if node has incoming edges (is sink if no incoming, but this requires edges computation)
+                    // For now, rely on naming conventions or passed metadata
+                    if (data.graph.edges) {
+                        const inDegree = data.graph.edges.filter(e => e.target === n.id).length;
+                        const outDegree = data.graph.edges.filter(e => e.source === n.id).length;
+                        isSource = inDegree === 0 && outDegree > 0;
+                        isSink = outDegree === 0 && inDegree > 0;
+                    } else if (data.graph.links) {
+                        const inDegree = data.graph.links.filter(e => e.target === n.id).length;
+                        const outDegree = data.graph.links.filter(e => e.source === n.id).length;
+                        isSource = inDegree === 0 && outDegree > 0;
+                        isSink = outDegree === 0 && inDegree > 0;
+                    }
+                }
+
+                elements.nodes.push({
+                    data: { 
+                        ...n, 
+                        label: label,
+                        is_critical: (n.pagerank > 0.1 || n.change_velocity_30d > 10) ? "true" : "false",
+                        is_dead_code_candidate: n.is_dead_code_candidate ? "true" : "false",
+                        is_source: isSource ? "true" : "false",
+                        is_sink: isSink ? "true" : "false"
+                    }
+                });
+            });
+
+            edges.forEach(e => {
+                elements.edges.push({
+                    data: { source: e.source, target: e.target }
+                });
+            });
+
+            return elements;
+        }
+
+        function showDetails(data) {
+            document.getElementById('node-type').textContent = data.node_type || 'Module';
+            document.getElementById('node-id').textContent = data.id;
+            document.getElementById('node-purpose').textContent = data.purpose_statement || 'No analysis documentation available for this node.';
+            
+            document.getElementById('stat-rank').textContent = data.pagerank ? data.pagerank.toFixed(4) : '—';
+            document.getElementById('stat-velocity').textContent = data.change_velocity_30d || '0';
+            document.getElementById('stat-complexity').textContent = data.complexity_score || '—';
+            document.getElementById('stat-impact').textContent = '—'; // Would need server-side BFS check or pre-calc
+            
+            if(data.documentation_drift) {
+                document.getElementById('node-drift-alarm').style.display = 'block';
+            } else {
+                document.getElementById('node-drift-alarm').style.display = 'none';
+            }
+
+            sidebar.classList.add('visible');
+        }
+
+        function highlightDependencies(node) {
+            cy.elements().addClass('dimmed').removeClass('highlighted');
+            node.neighborhood().add(node).removeClass('dimmed').addClass('highlighted');
+        }
+
+        // --- Pattern Recognition Analytics ---
+        function analyzePatterns(patternName) {
+            // First clear existing patterns
+            cy.elements().removeClass('pattern-scc pattern-utility pattern-god pattern-isolated');
+            if (!patternName) return;
+
+            // Optional: Dim everything initially so patterns pop
+            // cy.elements().addClass('dimmed'); 
+
+            if (patternName === 'scc') {
+                // Tarjan's Strongly Connected Components
+                const components = cy.elements().components(); // cytoscape built-in for weak components
+                // For strong components, cytoscape has tarjanStronglyConnectedComponents()
+                const sccs = cy.elements().tarjanStronglyConnectedComponents();
+                sccs.forEach(scc => {
+                    if (scc.nodes().length > 1) { // Only loops, not single nodes
+                        scc.nodes().addClass('pattern-scc');
+                        scc.edges().addClass('pattern-scc');
+                    }
+                });
+            } 
+            else if (patternName === 'utility') {
+                // Calculate in-degree to find heavily depended-upon nodes
+                const nodes = cy.nodes();
+                const inDegrees = nodes.map(n => n.incomers('edge').length);
+                const avg = inDegrees.reduce((a,b) => a+b, 0) / inDegrees.length || 0;
+                // Threshold: > 0 and significantly above average
+                const threshold = Math.max(2, avg * 2);
+                
+                nodes.forEach(n => {
+                    if (n.incomers('edge').length >= threshold) {
+                        n.addClass('pattern-utility');
+                    }
+                });
+            }
+            else if (patternName === 'god') {
+                // Calculate out-degree to find orchestrators/facades
+                const nodes = cy.nodes();
+                const outDegrees = nodes.map(n => n.outgoers('edge').length);
+                const avg = outDegrees.reduce((a,b) => a+b, 0) / outDegrees.length || 0;
+                // Threshold: > 0 and significantly above average
+                const threshold = Math.max(3, avg * 2.5);
+                
+                nodes.forEach(n => {
+                    if (n.outgoers('edge').length >= threshold) {
+                        n.addClass('pattern-god');
+                    }
+                });
+            }
+            else if (patternName === 'isolated') {
+                // 0 connected edges
+                cy.nodes().forEach(n => {
+                    if (n.degree() === 0) {
+                        n.addClass('pattern-isolated');
+                    }
+                });
+            }
+        }
+
+        // --- Event Listeners ---
+        document.getElementById('view-module').onclick = function() {
+            this.classList.add('active');
+            document.getElementById('view-lineage').classList.remove('active');
+            document.getElementById('legend-module').style.display = 'flex';
+            document.getElementById('legend-lineage').style.display = 'none';
+            document.getElementById('pattern-menu').style.display = 'flex'; // Patterns only for modules right now
+            resetPatternButtons();
+            initGraph(MODULE_DATA, 'module');
+        };
+
+        document.getElementById('view-lineage').onclick = function() {
+            this.classList.add('active');
+            document.getElementById('view-module').classList.remove('active');
+            document.getElementById('legend-module').style.display = 'none';
+            document.getElementById('legend-lineage').style.display = 'flex';
+            document.getElementById('pattern-menu').style.display = 'none'; // Distracting for lineage
+            resetPatternButtons();
+            initGraph(LINEAGE_DATA, 'lineage');
+        };
+
+        document.querySelectorAll('.pattern-btn').forEach(btn => {
+            btn.onclick = function() {
+                const isActive = this.classList.contains('active');
+                resetPatternButtons();
+                
+                if (!isActive) {
+                    this.classList.add('active');
+                    analyzePatterns(this.dataset.pattern);
+                } else {
+                    analyzePatterns(null); // Clear
+                }
+            };
+        });
+
+        function resetPatternButtons() {
+            document.querySelectorAll('.pattern-btn').forEach(b => b.classList.remove('active'));
+            if(cy) cy.elements().removeClass('pattern-scc pattern-utility pattern-god pattern-isolated');
+        }
+
+        // Ready
+        window.onload = () => {
+            setTimeout(() => {
+                document.getElementById('loading').style.opacity = '0';
+                setTimeout(() => document.getElementById('loading').style.display = 'none', 500);
+                initGraph(MODULE_DATA, 'module');
+            }, 1000);
+        };
+    </script>
+</body>
+</html>
