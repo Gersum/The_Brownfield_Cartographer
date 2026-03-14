@@ -38,10 +38,12 @@ class ModuleNode(BaseModel):
     change_velocity_30d: int = Field(0, description="Number of commits touching this file in last 30 days")
     commit_summaries: list[str] = Field(default_factory=list, description="Recent commit messages for this file")
     is_dead_code_candidate: bool = Field(False, description="Exported but never imported")
+    documentation_drift: bool = Field(False, description="True if code is out of sync with docs/history")
     last_modified: Optional[datetime] = None
     imports: list[str] = Field(default_factory=list, description="List of resolved import paths")
     public_functions: list[str] = Field(default_factory=list, description="Public function names")
     public_classes: list[str] = Field(default_factory=list, description="Public class names")
+    category: str = Field("unknown", description="Architectural category: model, logic, utility, interface, unknown")
     node_type: str = "module"
 
 

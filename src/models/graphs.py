@@ -12,3 +12,4 @@ class GraphMetadata(BaseModel):
     node_count: int = 0
     edge_count: int = 0
     graph_type: str = ""  # "module_graph" or "lineage_graph"
+    git_commit: str = ""

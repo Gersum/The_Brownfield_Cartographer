@@ -172,6 +172,10 @@ class KnowledgeGraph:
             results.append(d)
         return results
 
+    def get_all_edges(self) -> list[dict]:
+        """Get all edges with their attributes."""
+        return self.query_edges("1=1")
+
     def edge_count(self) -> int:
         """Count total edges."""
         return self._conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
@@ -320,6 +324,7 @@ class KnowledgeGraph:
             node_count=self.node_count(),
             edge_count=self.edge_count(),
             graph_type="knowledge_graph",
+            git_commit=self.get_meta("git_commit") or "",
         )
         return {
             "metadata": metadata.model_dump(),
@@ -341,6 +346,10 @@ class KnowledgeGraph:
         with open(path) as f:
             data = json.load(f)
         kg = cls(repo_path=data.get("metadata", {}).get("repo_path", ""))
+        git_commit = data.get("metadata", {}).get("git_commit", "")
+        if git_commit:
+            kg.set_meta("git_commit", git_commit)
+            
         graph_data = data.get("graph", {})
         G = nx.node_link_graph(graph_data)
         # Populate SQLite from the loaded graph
@@ -387,18 +396,21 @@ class KnowledgeGraph:
 
     # ── Internal helpers ────────────────────────────────────────────
 
-    def _set_meta(self, key: str, value: str) -> None:
+    def set_meta(self, key: str, value: str) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
             (key, value),
         )
         self._conn.commit()
 
-    def _get_meta(self, key: str) -> Optional[str]:
+    def get_meta(self, key: str) -> Optional[str]:
         row = self._conn.execute(
             "SELECT value FROM metadata WHERE key = ?", (key,)
         ).fetchone()
         return row["value"] if row else None
+        
+    def _set_meta(self, key: str, value: str) -> None:
+        self.set_meta(key, value)
 
     def close(self) -> None:
         """Close the database connection."""

@@ -14,12 +14,13 @@ dependencies = [
     "click>=8.0",
     "gitpython>=3.1",
     "rich>=13.0",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
 llm = [
-    "google-genai>=1.0",
     "langchain-core>=0.3",
+    "langchain-ollama>=0.2",
     "langgraph>=0.2",
     "scikit-learn>=1.4",
     "tiktoken>=0.7",
@@ -29,5 +30,5 @@ llm = [
 cartographer = "src.cli:main"
 
 [build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
