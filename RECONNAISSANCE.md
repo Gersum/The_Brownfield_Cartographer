@@ -63,3 +63,59 @@ If **`raw_orders` seed** fails:
 - **Automatic ref() graph construction** — mapping all dbt model dependencies
 - **CTE lineage tracing** — understanding intermediate transformations within a single SQL file
 - **Cross-file column-level lineage** — tracking which columns flow from seeds to final models
+
+---
+
+## Final Report Sections
+
+### 1. Architecture Diagram (Four-Agent Pipeline)
+
+The system follows a sequential multi-agent pipeline orchestrated by `src/orchestrator.py`:
+
+```mermaid
+graph LR
+    A[Surveyor] --> B[Hydrologist]
+    B --> C[Semanticist]
+    C --> D[Archivist]
+    
+    subgraph "Core Agents"
+    A["Surveyor (Static Structure)"]
+    B["Hydrologist (Data Lineage)"]
+    C["Semanticist (LLM Synthesis)"]
+    D["Archivist (Artifact Generation)"]
+    end
+    
+    subgraph "Interactive Layer"
+    N["Navigator (LangChain/LangGraph)"]
+    end
+    
+    D -.-> N
+```
+
+### 2. Accuracy Analysis (System vs. Manual)
+
+| Question | Manual Answer | System Output (Cartographer) | Accuracy | Why? |
+|----------|---------------|-----------------------------|----------|------|
+| Ingestion Path | Seeds (CSV) | Correctly identified sources in `LINEAGE_MAP.md` | High | SQLLineage + dbt parser correctly traced refs to seeds. |
+| Critical Modules | `customers`, `orders` | Correctly identified high PageRank hubs in `SYSTEM_MAP.md` | High | PageRank accurately highlights files with many dependents. |
+| Blast Radius | `stg_orders` impacts everything | `Navigator.blast_radius()` correctly traces downstream deps | High | Import graph correctly identifies reverse dependencies. |
+| Business Logic | Concentrated in final models | Semanticist (LLM) correctly summarizes logic | Medium | LLM sometimes misses specific CTE nuances but gets the "vibe". |
+| Freq/Velocity | Near zero | Surveyor (Git) correctly identifies 0 change velocity | High | Subprocess call to `git log` is objective and precise. |
+
+### 3. Limitations & Opaque Areas
+
+1. **Dynamic SQL**: The `sql_lineage` analyzer (via `sqlglot`) fails on complex dynamic SQL strings or unusual dbt macros that don't follow the standard `ref()` syntax.
+2. **Context Window**: The `Semanticist` truncates files longer than 30k tokens. In massive monolithic files, it may lose context of functions near the end of the file.
+3. **LLM Hallucinations**: Occasionally, the `Semanticist` hallucinates a higher complexity score or "doc drift" if the model's temperature is too high or the prompt is ambiguous.
+
+### 4. FDE Applicability
+
+In a real client engagement, I would use the Brownfield Cartographer as an "Onboarding Accelerator." Instead of spending 3 days manually tracing a 1,000-model dbt project, I would point the Cartographer at the repo and generate the `onboarding_brief.md`. I would then use the `Navigator` agent to immediately ask "Where is the revenue calculation logic?" This reduces the "time-to-first-ticket" from days to hours, allowing the FDE to provide value faster while ensuring they don't accidentally break high-blast-radius upstream modules.
+
+### 5. Self-Audit Results (Week 1 Repo)
+
+**Target**: Week 1 "Document Intelligence Refinery"
+- **Expected**: I expected the `Surveyor` to highlight `extraction_router.py` as a critical hub.
+- **Actual**: It correctly identified it but also flagged `ldu_models.py` as having higher PageRank due to many imports.
+- **Discrepancy**: I manually underestimated how pervasive my Pydantic models were. The automated analysis provided a more objective view of architectural coupling.
+- **Found**: Identified 2 "Dead Code" candidates (experimental scripts in `/tmp` folder) that I had forgotten to delete.

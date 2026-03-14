@@ -127,7 +127,7 @@ class Visualizer:
                 
                 # Coloring
                 if node_type == 'dataset':
-                    color = '#8BC34A' # Light Green for datasets
+                    color = '#E91E63' # Pink for datasets
                 else:
                     color = CATEGORY_COLORS.get(category, CATEGORY_COLORS['unknown'])
                 
@@ -152,7 +152,7 @@ class Visualizer:
                 mpatches.Patch(color=color, label=cat.capitalize()) 
                 for cat, color in CATEGORY_COLORS.items()
             ]
-            legend_handles.append(mpatches.Patch(color='#8BC34A', label='Dataset/Table'))
+            legend_handles.append(mpatches.Patch(color='#E91E63', label='Dataset/Table'))
             plt.legend(handles=legend_handles, loc='upper right', frameon=True, facecolor='#1a1a24', edgecolor='white')
             
             plt.title("Codebase Architecture Overview (Color-Coded)", color='white', size=24, pad=20)

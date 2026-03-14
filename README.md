@@ -101,3 +101,4 @@ src/
 - **Click**: CLI framework
 - **GitPython**: Git log analysis for change velocity
 - **Rich**: Terminal output formatting
+- **Ollama**: Local LLM provider for Semanticist/Navigator agents (run `ollama pull llama3.1` before analyzing)

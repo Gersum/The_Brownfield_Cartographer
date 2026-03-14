@@ -13,7 +13,9 @@ The following phases have been completed and stabilized:
 
 ## System Architecture
 The Brownfield Cartographer operates as a multi-agent pipeline orchestrated by a central Knowledge Graph.
-  ![Archiecture](Archiecture.png)
+  
+  ![Archiecture](./Architecture.png)
+
 ```mermaid
 graph TD
     Repo[Repository Path / URL] --> Surveyor[Surveyor Agent]
