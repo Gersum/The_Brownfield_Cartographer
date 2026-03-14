@@ -40,12 +40,67 @@ class SurveyorAgent:
         self.modules: dict[str, ModuleNode] = {}
         self.trace_log: list[dict] = []
 
-    def run(self) -> KnowledgeGraph:
+    def _get_current_commit(self) -> Optional[str]:
+        try:
+            res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_path, capture_output=True, text=True)
+            if res.returncode == 0:
+                return res.stdout.strip()
+        except Exception:
+            pass
+        return None
+
+    def _get_changed_files(self, prev_commit: str, curr_commit: str) -> Optional[set[Path]]:
+        try:
+            res = subprocess.run(["git", "diff", "--name-only", prev_commit, curr_commit], 
+                                 cwd=self.repo_path, capture_output=True, text=True)
+            if res.returncode == 0:
+                return {self.repo_path / f.strip() for f in res.stdout.strip().splitlines() if f.strip()}
+        except Exception:
+            pass
+        return None
+
+    def run(self, incremental: bool = False, output_dir: Optional[Path] = None) -> KnowledgeGraph:
         """Execute the full Surveyor analysis pipeline."""
         console.print(f"\n[bold cyan]🔭 Surveyor Agent[/bold cyan] — Analyzing {self.repo_path}")
 
+        current_commit = self._get_current_commit()
+        changed_files = None
+        
+        if incremental and output_dir:
+            graph_path = output_dir / "module_graph.json"
+            if graph_path.exists():
+                console.print("  🔄 Incremental mode: Loading previous knowledge graph...")
+                try:
+                    self.graph = KnowledgeGraph.load(graph_path)
+                    
+                    # Prepopulate self.modules
+                    for node in self.graph.get_nodes_by_type("module"):
+                        self.modules[node["id"]] = ModuleNode(**node)
+                        
+                    prev_commit = self.graph.get_meta("git_commit")
+                    if prev_commit and current_commit and prev_commit != current_commit:
+                        changed_files = self._get_changed_files(prev_commit, current_commit)
+                        if changed_files is not None:
+                            console.print(f"  📝 Detected {len(changed_files)} changed files.")
+                        else:
+                            console.print("  ⚠️  Failed to get changed files. Falling back to full analysis.")
+                    elif prev_commit == current_commit:
+                        console.print("  ⏩ No new commits since last run. Skipping static analysis.")
+                        return self.graph
+                except Exception as e:
+                    console.print(f"  ⚠️  Failed to load previous graph: {e}")
+                    self.graph = KnowledgeGraph(str(self.repo_path)) # Reset
+
+        if current_commit:
+            self.graph.set_meta("git_commit", current_commit)
+
         # Step 1: Discover and analyze files
-        self._analyze_all_files()
+        self._analyze_all_files(changed_files)
+
+        # Always drop old edges because we completely rebuild the import graph
+        self.graph._conn.execute("DELETE FROM edges")
+        self.graph._conn.commit()
+        self.graph._nx_cache = None
 
         # Step 2: Build module import graph
         self._build_import_graph()
@@ -82,22 +137,45 @@ class SurveyorAgent:
 
     # ── Internal methods ────────────────────────────────────────────
 
-    def _analyze_all_files(self) -> None:
+    def _analyze_all_files(self, changed_files: Optional[set[Path]] = None) -> None:
         """Discover and analyze all source files."""
-        files = discover_files(self.repo_path)
-        console.print(f"  📂 Discovered {len(files)} source files")
+        if changed_files is None:
+            files = discover_files(self.repo_path)
+            console.print(f"  📂 Discovered {len(files)} source files")
+        else:
+            files = changed_files
+            console.print(f"  📂 Analyzing {len(files)} changed files")
+            
+            # Remove nodes that no longer exist
+            for fpath in files:
+                try:
+                    rel_path = str(fpath.relative_to(self.repo_path))
+                except ValueError:
+                    rel_path = fpath.name
+                if not fpath.exists():
+                    if rel_path in self.modules:
+                        del self.modules[rel_path]
+                        self.graph._conn.execute("DELETE FROM nodes WHERE id = ?", (rel_path,))
+                        self.graph._conn.commit()
+                        self.graph._nx_cache = None
+
+        valid_files = [f for f in files if f.exists()]
+        
+        if not valid_files:
+            return
 
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             console=console,
         ) as progress:
-            task = progress.add_task("  Analyzing files...", total=len(files))
+            task = progress.add_task("  Analyzing files...", total=len(valid_files))
 
-            for fpath in files:
+            for fpath in valid_files:
                 try:
                     module = self.analyzer.analyze_module(fpath, self.repo_path)
                     if module:
+                        module.category = self._categorize_module(module)
                         self.modules[module.id] = module
                         self.graph.add_node(module)
                         self._log("analyze_module", module.id, "success")
@@ -285,3 +363,29 @@ class SurveyorAgent:
             "target": target,
             "result": result,
         })
+
+    def _categorize_module(self, module: ModuleNode) -> str:
+        """Heuristically categorize a module based on path and content."""
+        path_lower = module.id.lower()
+        
+        # dbt / SQL Models
+        if module.language == Language.SQL or "/models/" in path_lower:
+            return "model"
+        
+        # Interfaces / Entrypoints
+        if "cli" in path_lower or "api" in path_lower or "interface" in path_lower or "main.py" in path_lower:
+            return "interface"
+            
+        # Core Implementation Logic
+        if "agent" in path_lower or "orchestrator" in path_lower or "engine" in path_lower or "processor" in path_lower:
+            return "logic"
+            
+        # Utilities / Helpers
+        if "util" in path_lower or "helper" in path_lower or "common" in path_lower or "tool" in path_lower:
+            return "utility"
+            
+        # Fallback based on content if path isn't clear
+        if "class" in path_lower or any(c.lower().endswith("base") or c.lower().endswith("interface") for c in module.public_classes):
+            return "interface"
+            
+        return "unknown"
