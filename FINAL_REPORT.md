@@ -68,6 +68,45 @@ The **KnowledgeGraph** (`src/graph/knowledge_graph.py`) is the central store:
     - `find_implementation`, `trace_lineage`, `blast_radius`, `explain_module`.
   - Runs a manual ReAct loop in the terminal for interactive exploration.
 
+### 1.4 End‑to‑End Architecture Diagram
+
+The full Cartographer pipeline, consolidated across interim and final additions (including query surfaces), is:
+![Archiecture](./FullArchitecture.png)
+```mermaid
+graph LR
+    subgraph Ingestion
+        R[Target Repo / Git URL]
+    end
+
+    subgraph Analysis Pipeline
+        S["Surveyor\nStatic Structure"] -->|Module Graph| KG[("KnowledgeGraph\nSQLite + NetworkX")]
+        H["Hydrologist\nData Lineage"] -->|Lineage Graph| KG
+        KG --> Se["Semanticist\nLLM Semantics"]
+        KG --> A["Archivist\nArtifacts & Visuals"]
+    end
+
+    subgraph Semantic Layer
+        Se -->|"Purpose Statements\nDoc Drift\nDomain Clusters"| KG
+        Se -->|Five Day‑One Answers| OB[onboarding_brief.md]
+    end
+
+    subgraph Artifacts & UX
+        A --> SM[SYSTEM_MAP.md]
+        A --> LM[LINEAGE_MAP.md]
+        A --> CB[CODEBASE.md]
+        A --> DSH[dashboard.html]
+        A --> PV["Premium Visuals\n(Pyvis/Matplotlib)"]
+    end
+
+    subgraph Query Interfaces
+      KG --> N["Navigator Agent<br/>(query CLI)"]
+      KG --> SA["semantic-ask<br/>(Semanticist CLI)"]
+    end
+
+    R -->|analyze| S
+    R -->|analyze| H
+```
+
 ---
 
 ## 2. Static Structure & Module Graph (Surveyor)
@@ -348,20 +387,7 @@ The system now supports FDE workflows across three phases:
 
 ---
 
-## 9. Limitations & Future Work
-
-### 9.1 Known Limitations
-
-- **Context Scope**:
-  - Semanticist’s free‑form answers are intentionally constrained to structured graph context, not arbitrary file content, to ensure grounding.
-
-- **Dynamic Behavior**:
-  - Extremely dynamic SQL generation or reflection‑heavy Python may still yield partial lineage coverage.
-
-- **LLM Variability**:
-  - Despite prompt constraints, model outputs can be occasionally hedging; prompts can be tuned further for more decisive phrasing.
-
-### 9.2 Potential Extensions
+### 9. Potential Extensions
 
 - Column‑level lineage where SQL structure permits it.
 - Domain‑based grouping and filtering in the dashboard based on `domain_cluster` labels.
